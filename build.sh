@@ -26,8 +26,8 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
   <key>CFBundleIdentifier</key><string>nl.wiregram.protools</string>
   <key>CFBundleExecutable</key><string>Wiregram</string>
   <key>CFBundlePackageType</key><string>APPL</string>
-  <key>CFBundleShortVersionString</key><string>1.0</string>
-  <key>CFBundleVersion</key><string>1</string>
+  <key>CFBundleShortVersionString</key><string>1.1</string>
+  <key>CFBundleVersion</key><string>2</string>
   <key>CFBundleIconFile</key><string>AppIcon</string>
   <key>LSMinimumSystemVersion</key><string>13.0</string>
   <key>NSHighResolutionCapable</key><true/>
@@ -36,5 +36,8 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 </plist>
 PLIST
 
-codesign --force --deep --sign - --identifier nl.wiregram.protools "$APP"
+# Ad-hoc signature with a fixed designated requirement (the bundle identifier), so macOS keeps
+# the Accessibility permission across rebuilds instead of tying it to this build's hash.
+codesign --force --deep --sign - --identifier nl.wiregram.protools \
+  -r='designated => identifier "nl.wiregram.protools"' "$APP"
 echo "Built $(pwd)/$APP"

@@ -25,6 +25,12 @@ struct GraphNode: Identifiable, Equatable {
     var objectActive: Bool?       // true = object receives the signal, false = bed/bus does
     var atmosGroup: String?
     var detail = ""            // extra subtitle (device info)
+    var ptType = ""            // PTSL track type (TT_Audio, TT_Aux, …) or "collapsed"
+    /// Collapsed block: the tracks it stands for.
+    var memberNames: [String] = []
+    /// Key of the collapse bucket this node is (or belongs to); nil when it can't be collapsed.
+    var collapseKey: String?
+    var isCollapsed: Bool { ptType == "collapsed" }
     var column = 0
     var row: Double = 0
 }
@@ -38,6 +44,8 @@ struct GraphEdge: Identifiable, Equatable {
     var isPre = false
     /// Assigned but not carrying signal (the other side of an Atmos bus/object toggle).
     var inactiveRoute = false
+    /// How many original connections this edge stands for (after collapsing tracks).
+    var count = 1
     var id: String { "\(from)>\(to)>\(isSend)>\(label)" }
 }
 
@@ -58,7 +66,7 @@ struct TrackRow: Identifiable {
 final class SessionModel: ObservableObject {
     // Raw state
     @Published private(set) var sessionName = ""
-    @Published private(set) var ptslStatus = "Verbinden…"
+    @Published private(set) var ptslStatus = "Connecting…"
     @Published private(set) var ptslOK = false
     @Published private(set) var axTrusted = ProToolsAX.isTrusted
     @Published private(set) var axWindow = ""
@@ -72,12 +80,33 @@ final class SessionModel: ObservableObject {
         let i = ioPaths.values.filter { $0.direction == "Input" }.count
         let o = ioPaths.values.filter { $0.direction == "Output" }.count
         let a = ioPaths.values.filter { $0.direction == "Atmos" }.count
-        if i == 0 && o == 0 && a == 0 { return "I/O: kies Inlezen ▸ I/O-instellingen om hardware-paden in te lezen" }
-        return "I/O: \(i) inputs, \(o) outputs" + (a > 0 ? ", \(a) Atmos-paden" : "")
+        if i == 0 && o == 0 && a == 0 { return "I/O: choose Read ▸ I/O Setup to read hardware paths" }
+        return "I/O: \(i) inputs, \(o) outputs" + (a > 0 ? ", \(a) Atmos paths" : "")
     }
 
     // View options
-    @Published var showSends = true { didSet { rebuild() } }
+    enum SendMode: String, CaseIterable { case all, selection, off }
+    /// All send lines, only those of the selected/hovered track, or none.
+    @Published var sendMode: SendMode = SendMode(rawValue: UserDefaults.standard.string(forKey: "sendMode") ?? "") ?? .all {
+        didSet { UserDefaults.standard.set(sendMode.rawValue, forKey: "sendMode"); if (sendMode == .off) != (oldValue == .off) { rebuild() } }
+    }
+    var showSends: Bool { sendMode != .off }
+
+    /// Large sessions: merge source tracks into one block per routing / folder / group.
+    enum CollapseMode: String, CaseIterable { case off, routing, folder, group }
+    @Published var collapseMode: CollapseMode = CollapseMode(rawValue: UserDefaults.standard.string(forKey: "collapseMode") ?? "") ?? .off {
+        didSet { UserDefaults.standard.set(collapseMode.rawValue, forKey: "collapseMode"); expanded = []; rebuild() }
+    }
+    /// Collapse buckets the user opened up again.
+    @Published private(set) var expanded: Set<String> = []
+    func toggleCollapse(_ key: String) {
+        if expanded.contains(key) { expanded.remove(key) } else { expanded.insert(key) }
+        selectedID = nil; hoveredID = nil
+        rebuild()
+    }
+    func collapseAll() { expanded = []; rebuild() }
+    /// Set when the canvas was dragged (panned), so the click that ends it doesn't deselect.
+    var lastPanEnd = Date.distantPast
     // What to show inside the blocks (each adds a line)
     @Published var showGroupNames = false
     @Published var showInserts = false
@@ -145,11 +174,66 @@ final class SessionModel: ObservableObject {
 
     /// Reads Pro Tools group membership (read-only: selects tracks one by one via PTSL,
     /// reads the Group List indicators, then restores the original selection).
+    // MARK: Reading from Pro Tools (briefly controls the Pro Tools UI)
+
+    enum ReadKind { case groups, hidden, io }
+    /// "Don't ask again" for the read notice: remembered only while the app runs.
+    private var skipReadNotice = false
+
+    /// Before PT Wiregram drives Pro Tools to read something: explain what will happen (unless the
+    /// user said not to ask again this time) and make sure the session isn't playing.
+    private func prepareRead(_ kind: ReadKind) -> Bool {
+        if !skipReadNotice {
+            let a = NSAlert()
+            a.messageText = "PT Wiregram will briefly control Pro Tools"
+            let what: String
+            switch kind {
+            case .groups: what = "To read the groups, PT Wiregram selects each track for a moment and then restores your selection."
+            case .hidden: what = "To read the hidden tracks, PT Wiregram shows them for a moment, reads their routing and hides them again."
+            case .io: what = "To read the I/O Setup, PT Wiregram opens Setup ▸ I/O, reads the Input and Output tabs and closes it with Cancel."
+            }
+            a.informativeText = what + "\n\nNothing in your session is changed, but it's a good idea to save your session first (⌘S). If the session is playing, playback is stopped first. Please don't use Pro Tools until reading is done."
+            a.addButton(withTitle: "Continue")
+            a.addButton(withTitle: "Cancel")
+            a.showsSuppressionButton = true
+            a.suppressionButton?.title = "Don't ask again until PT Wiregram quits"
+            guard a.runModal() == .alertFirstButtonReturn else { return false }
+            if a.suppressionButton?.state == .on { skipReadNotice = true }
+        }
+        return ensureStopped()
+    }
+
+    /// Stops playback before reading. A running recording is never stopped by PT Wiregram.
+    private func ensureStopped() -> Bool {
+        let c = PTSLClient()
+        guard let state = try? c.transportState(), !state.isEmpty else { return true }
+        func running(_ s: String) -> Bool { !(s.contains("Stopped") || s.contains("Unknown")) }
+        guard running(state) else { return true }
+        if state.contains("Recording") {
+            let a = NSAlert()
+            a.messageText = "Pro Tools is recording"
+            a.informativeText = "PT Wiregram doesn't read while Pro Tools records. Try again when the recording has stopped."
+            a.runModal()
+            return false
+        }
+        try? c.togglePlayState()
+        for _ in 0..<30 {
+            if let s = try? c.transportState(), !running(s) { return true }
+            Thread.sleep(forTimeInterval: 0.1)
+        }
+        let a = NSAlert()
+        a.messageText = "Couldn't stop playback"
+        a.informativeText = "Stop playback in Pro Tools and try again."
+        a.runModal()
+        return false
+    }
+
     func readGroups() {
-        groupStatus = "Groepen inlezen…"
+        guard prepareRead(.groups) else { return }
+        groupStatus = "Reading groups…"
         let names = tracks.map(\.name)
         worker.readGroups(trackNames: names, progress: { [weak self] i, n in
-            Task { @MainActor in self?.groupStatus = "Groepen inlezen… \(i)/\(n)" }
+            Task { @MainActor in self?.groupStatus = "Reading groups… \(i)/\(n)" }
         }) { [weak self] result in
             Task { @MainActor in
                 guard let self else { return }
@@ -157,10 +241,10 @@ final class SessionModel: ObservableObject {
                 case .success(let g):
                     self.groups = g
                     if let d = try? JSONEncoder().encode(g) { UserDefaults.standard.set(d, forKey: "groups:" + self.sessionName) }
-                    self.groupStatus = "\(g.count) groepen ingelezen"
+                    self.groupStatus = "\(g.count) groups read"
                     if !g.isEmpty { self.groupByGroups = true }
                 case .failure(let e):
-                    self.groupStatus = "Mislukt: \(e.localizedDescription)"
+                    self.groupStatus = "Failed: \(e.localizedDescription)"
                 }
                 self.rebuild()
             }
@@ -173,8 +257,9 @@ final class SessionModel: ObservableObject {
         let names = tracks.filter { $0.isHidden && Self.routableTypes.contains($0.type) }.map(\.name)
         let unhide = tracks.filter(\.isHiddenExplicitly).map(\.name) // incl. hidden folders
         let openFolders = Self.closedAncestors(of: tracks.filter { $0.isHidden && Self.routableTypes.contains($0.type) }, in: tracks)
-        guard !names.isEmpty, !unhide.isEmpty else { hiddenStatus = "Geen verborgen tracks"; return }
-        hiddenStatus = "Verborgen tracks inlezen…"
+        guard !names.isEmpty, !unhide.isEmpty else { hiddenStatus = "No hidden tracks"; return }
+        guard prepareRead(.hidden) else { return }
+        hiddenStatus = "Reading hidden tracks…"
         worker.enqueueJob { [weak self] in
             let result = Result { try ProToolsAX.readHiddenRouting(ptsl: PTSLClient(), names: names, unhide: unhide, openFolders: openFolders) }
             Task { @MainActor in
@@ -183,9 +268,9 @@ final class SessionModel: ObservableObject {
                 case .success(let r):
                     self.hiddenRouting = r
                     if let d = try? JSONEncoder().encode(r) { UserDefaults.standard.set(d, forKey: "hidden:" + self.sessionName) }
-                    self.hiddenStatus = "\(r.count) van \(names.count) verborgen tracks ingelezen"
+                    self.hiddenStatus = "\(r.count) of \(names.count) hidden tracks read"
                 case .failure(let e):
-                    self.hiddenStatus = "Mislukt: \(e.localizedDescription)"
+                    self.hiddenStatus = "Failed: \(e.localizedDescription)"
                 }
                 self.rebuild()
             }
@@ -194,7 +279,8 @@ final class SessionModel: ObservableObject {
 
     /// Opens Setup ▸ I/O, reads the Input and Output tabs and closes it again (Cancel).
     func readIO() {
-        ioReadStatus = "I/O inlezen…"
+        guard prepareRead(.io) else { return }
+        ioReadStatus = "Reading I/O…"
         worker.enqueueJob { [weak self] in
             let result = Result { try ProToolsAX.readIOViaDialog() }
             Task { @MainActor in
@@ -203,9 +289,9 @@ final class SessionModel: ObservableObject {
                 case .success(let io):
                     self.applyIO(io)
                     let i = io.values.filter { $0.direction == "Input" }.count, o = io.count - i
-                    self.ioReadStatus = "I/O ingelezen: \(i) inputs, \(o) outputs"
+                    self.ioReadStatus = "I/O read: \(i) inputs, \(o) outputs"
                 case .failure(let e):
-                    self.ioReadStatus = "Mislukt: \(e.localizedDescription)"
+                    self.ioReadStatus = "Failed: \(e.localizedDescription)"
                 }
             }
         }
@@ -227,6 +313,33 @@ final class SessionModel: ObservableObject {
         if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") {
             NSWorkspace.shared.open(url)
         }
+    }
+
+    /// An old permission entry (from an earlier build with a different signature) can stay
+    /// switched on in System Settings without working. This removes PT Wiregram's own entry,
+    /// asks again and opens the settings, so the user can switch it on fresh.
+    func resetAccessibility() {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/tccutil")
+        p.arguments = ["reset", "Accessibility", Bundle.main.bundleIdentifier ?? "nl.wiregram.protools"]
+        try? p.run()
+        p.waitUntilExit()
+        requestAccessibility()
+    }
+
+    /// Restarts the app (macOS sometimes only applies a new permission after a restart).
+    func relaunch() {
+        let path = Bundle.main.bundlePath
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/bin/sh")
+        p.arguments = ["-c", "sleep 0.7; /usr/bin/open \"$0\"", path]
+        try? p.run()
+        NSApp.terminate(nil)
+    }
+
+    /// The session has hidden tracks whose routing hasn't been read (Read ▸ Hidden Tracks).
+    var hasUnreadHiddenTracks: Bool {
+        hiddenRouting.isEmpty && tracks.contains { $0.isHidden && Self.routableTypes.contains($0.type) }
     }
 
     func injectGroups(_ g: [ProToolsAX.PTGroup]) { groups = g }
@@ -252,7 +365,7 @@ final class SessionModel: ObservableObject {
             lastSessionForGroups = s.sessionName
             let saved = UserDefaults.standard.data(forKey: "groups:" + s.sessionName)
                 .flatMap { try? JSONDecoder().decode([ProToolsAX.PTGroup].self, from: $0) } ?? []
-            if saved != groups { groups = saved; groupStatus = saved.isEmpty ? "" : "\(saved.count) groepen (eerder ingelezen)"; changed = true }
+            if saved != groups { groups = saved; groupStatus = saved.isEmpty ? "" : "\(saved.count) groups (read earlier)"; changed = true }
             let savedIO = UserDefaults.standard.data(forKey: "io:" + s.sessionName)
                 .flatMap { try? JSONDecoder().decode([String: IOPathInfo].self, from: $0) } ?? [:]
             if savedIO != ioPaths { ioPaths = savedIO; changed = true }
@@ -260,7 +373,7 @@ final class SessionModel: ObservableObject {
                 .flatMap { try? JSONDecoder().decode([String: [String: Double]].self, from: $0) } ?? [:]
             let savedHidden = UserDefaults.standard.data(forKey: "hidden:" + s.sessionName)
                 .flatMap { try? JSONDecoder().decode([String: AXRouting].self, from: $0) } ?? [:]
-            if savedHidden != hiddenRouting { hiddenRouting = savedHidden; hiddenStatus = savedHidden.isEmpty ? "" : "\(savedHidden.count) verborgen tracks (eerder ingelezen)"; changed = true }
+            if savedHidden != hiddenRouting { hiddenRouting = savedHidden; hiddenStatus = savedHidden.isEmpty ? "" : "\(savedHidden.count) hidden tracks (read earlier)"; changed = true }
         }
         lastUpdate = Date()
         if changed || nodes.isEmpty { rebuild() }
@@ -283,6 +396,7 @@ final class SessionModel: ObservableObject {
             var n = GraphNode(id: "t:" + t.id, kind: .track, name: t.name, typeLabel: Self.typeLabel(t.type, t.format),
                               color: Color(argbHex: t.color), inactive: t.isInactive, muted: t.isMuted,
                               soloed: t.isSoloed, index: t.index)
+            n.ptType = t.type
             if let r = routingByName[Self.normName(t.name)] ?? hiddenByName[Self.normName(t.name)] {
                 n.input = r.input; n.outputs = r.outputs; n.sends = r.sends; n.sendStates = r.sendStates
                 n.inserts = r.inserts
@@ -348,7 +462,7 @@ final class SessionModel: ObservableObject {
                 let objectOn = n.objectActive == true
                 for o in n.outputs { connect(n, o, send: false, slot: "", inactiveRoute: n.objectPath != nil && objectOn) }
                 if let obj = n.objectPath {
-                    connect(n, obj, send: false, slot: "", inactiveRoute: !objectOn, endpointType: "Atmos-object")
+                    connect(n, obj, send: false, slot: "", inactiveRoute: !objectOn, endpointType: "Atmos object")
                 }
             }
             if showSends {
@@ -384,7 +498,7 @@ final class SessionModel: ObservableObject {
                     if devices[rid] == nil {
                         var d = GraphNode(id: rid, kind: .deviceOut, name: rendererName, typeLabel: "Dolby Atmos Renderer",
                                           color: .secondary, inactive: false, muted: false, soloed: false, index: 0)
-                        d.detail = "Dolby Atmos · \(activeCount) bed/object-paden actief"
+                        d.detail = "Dolby Atmos · \(activeCount) bed/object paths active"
                         devices[rid] = d
                     }
                     edgeList.append(GraphEdge(from: eid, to: rid, isSend: false, label: e.name))
@@ -422,6 +536,7 @@ final class SessionModel: ObservableObject {
 
         var all = trackNodes + endpoints.values.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
             + devices.values.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+        if collapseMode != .off { collapse(&all, &edgeList) }
         if onlyRouted {
             let used = Set(edgeList.flatMap { [$0.from, $0.to] })
             all = all.filter { used.contains($0.id) }
@@ -453,6 +568,93 @@ final class SessionModel: ObservableObject {
                             inserts: n.inserts.isEmpty ? "—" : n.inserts.joined(separator: " · "),
                             vca: n.vcaNames.isEmpty ? "—" : n.vcaNames.joined(separator: ", "))
         }
+    }
+
+    /// Bus/path an edge carries: the output path, or a send's path without its slot ("A: Rev" → "Rev").
+    nonisolated static func busPath(_ e: GraphEdge) -> String {
+        guard e.isSend, let r = e.label.range(of: ": ") else { return displayPath(e.label) }
+        return displayPath(String(e.label[r.upperBound...]))
+    }
+
+    /// Replaces source tracks that share a bucket (same routing, folder or group) by one block.
+    private func collapse(_ nodes: inout [GraphNode], _ edges: inout [GraphEdge]) {
+        let kind = Dictionary(nodes.map { ($0.id, $0.kind) }, uniquingKeysWith: { a, _ in a })
+        // Only sources (tracks no other track feeds) are collapsed; buses stay visible.
+        let fed = Set(edges.filter { kind[$0.from] == .track && $0.from != $0.to }.map(\.to))
+        let trackByNodeID = Dictionary(tracks.map { ("t:" + $0.id, $0) }, uniquingKeysWith: { a, _ in a })
+        let trackByID = Dictionary(tracks.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+        var signature: [String: [String]] = [:]
+        for e in edges { signature[e.from, default: []].append("\(e.to)|\(e.isSend)|\(Self.norm(Self.busPath(e)))") }
+        var buckets: [String: [Int]] = [:]
+        for (i, n) in nodes.enumerated() where n.kind == .track && !fed.contains(n.id) && n.ptType != "TT_Master" {
+            let key: String?
+            switch collapseMode {
+            case .routing:
+                let sig = (signature[n.id] ?? []).sorted()
+                key = sig.isEmpty ? nil : "r:" + sig.joined(separator: ";")
+            case .folder:
+                key = trackByNodeID[n.id].flatMap { $0.parentFolderID.isEmpty ? nil : "f:" + $0.parentFolderID }
+            case .group:
+                key = n.groupIDs.first.map { "g:" + $0 }
+            case .off:
+                key = nil
+            }
+            if let key { buckets[key, default: []].append(i) }
+        }
+        var replace: [String: String] = [:]   // member id → collapsed id
+        var collapsed: [GraphNode] = []
+        for (key, idx) in buckets where idx.count > 1 {
+            if expanded.contains(key) {
+                for i in idx { nodes[i].collapseKey = key }
+                continue
+            }
+            let ms = idx.map { nodes[$0] }.sorted { $0.index < $1.index }
+            let name: String
+            switch collapseMode {
+            case .folder: name = trackByID[String(key.dropFirst(2))]?.name ?? "Folder"
+            case .group: name = groups.first { "g:" + $0.id == key }?.name ?? "Group"
+            default: name = Self.rangeName(ms)
+            }
+            let cid = "c:" + key
+            var c = GraphNode(id: cid, kind: .track, name: name, typeLabel: "\(ms.count) tracks", color: ms[0].color,
+                              inactive: ms.allSatisfy(\.inactive), muted: ms.allSatisfy(\.muted),
+                              soloed: ms.contains(where: \.soloed), index: ms[0].index)
+            c.ptType = "collapsed"
+            c.memberNames = ms.map(\.name)
+            c.collapseKey = key
+            c.groupIDs = ms[0].groupIDs; c.groupNames = ms[0].groupNames
+            let inputs = Set(ms.compactMap(\.input))
+            c.input = inputs.count == 1 ? inputs.first : (inputs.isEmpty ? nil : "\(inputs.count) inputs")
+            c.outputs = Array(Set(ms.flatMap(\.outputs))).sorted()
+            for m in ms { replace[m.id] = cid }
+            collapsed.append(c)
+        }
+        guard !replace.isEmpty else { return }
+        nodes.removeAll { replace[$0.id] != nil }
+        nodes.append(contentsOf: collapsed)
+        var merged: [GraphEdge] = []
+        var at: [String: Int] = [:]
+        for e in edges {
+            let from = replace[e.from] ?? e.from, to = replace[e.to] ?? e.to
+            if from == to && e.from != e.to { continue }
+            let key = "\(from)>\(to)>\(e.isSend)>\(e.isPre)>\(e.inactiveRoute)>\(Self.norm(Self.busPath(e)))"
+            if let i = at[key] {
+                merged[i].count += 1
+                merged[i].muted = merged[i].muted && e.muted
+            } else {
+                at[key] = merged.count
+                merged.append(GraphEdge(from: from, to: to, isSend: e.isSend, label: e.label, muted: e.muted,
+                                        isPre: e.isPre, inactiveRoute: e.inactiveRoute))
+            }
+        }
+        edges = merged
+    }
+
+    /// Consecutive tracks "DX 1" … "DX 24" → "DX 1 … DX 24"; scattered ones → "DX 1, DX 4, …".
+    static func rangeName(_ ms: [GraphNode]) -> String {
+        guard let first = ms.first, let last = ms.last, ms.count > 1 else { return ms.first?.name ?? "" }
+        let consecutive = zip(ms, ms.dropFirst()).allSatisfy { $1.index == $0.index + 1 }
+        return consecutive ? "\(first.name) … \(last.name)" : "\(first.name), \(ms[1].name), …"
     }
 
     private func layout(_ nodes: inout [GraphNode], _ edges: [GraphEdge]) {
@@ -506,57 +708,111 @@ final class SessionModel: ObservableObject {
             return (g, n.kind == .deviceIn ? (firstTarget[n.id] ?? 0) : n.index)
         }
 
-        // Vertical placement: sources in session order; every later column is placed at the
-        // average height of its inputs (barycenter), then pushed apart so nothing overlaps.
+        // Vertical placement: sources in session order; every later column is placed near its
+        // inputs (weighted: an output pulls harder than a send), then refined so blocks also sit
+        // near where they go, and stay out of the way of lines that pass through their column.
         var rowOf: [String: Double] = [:]
         let maxCol = col.values.max() ?? 0
-        var preds: [String: [String]] = [:]
-        for e in es where kindOf[e.from] != .deviceIn { preds[e.to, default: []].append(e.from) }
+        var preds: [String: [(String, Double)]] = [:], succs: [String: [(String, Double)]] = [:]
+        for e in es where kindOf[e.from] != .deviceIn && e.from != e.to {
+            let w: Double = e.isSend ? 1 : 3
+            preds[e.to, default: []].append((e.from, w))
+            succs[e.from, default: []].append((e.to, w))
+        }
         let overrides = rowOverrides[layoutKey] ?? [:]
-        // Places nodes at their wanted rows without overlap; blocks the user dragged keep
-        // their row, the others flow around them.
-        func place(_ wanted: [(GraphNode, Double)]) {
-            let fixed = wanted.compactMap { w in overrides[w.0.id].map { (w.0.id, $0) } }
+
+        /// Least-squares fit of `want` that keeps the order and the heights (pool adjacent violators).
+        func fit(_ want: [Double], _ h: [Double]) -> [Double] {
+            var off: [Double] = [], acc = 0.0
+            for x in h { off.append(acc); acc += x }
+            var blocks: [(sum: Double, n: Int)] = []
+            for (i, w) in want.enumerated() {
+                blocks.append((w - off[i], 1))
+                while blocks.count > 1 {
+                    let b = blocks[blocks.count - 1], a = blocks[blocks.count - 2]
+                    guard a.sum / Double(a.n) > b.sum / Double(b.n) else { break }
+                    blocks.removeLast(2); blocks.append((a.sum + b.sum, a.n + b.n))
+                }
+            }
+            var out: [Double] = []
+            for b in blocks { out += Array(repeating: b.sum / Double(b.n), count: b.n) }
+            return out.enumerated().map { $0.element + off[$0.offset] }
+        }
+        /// Places a column's items (real blocks and passing lines) without overlap; blocks the
+        /// user dragged keep their row, the others flow around them.
+        func place(_ items: [(id: String?, want: Double, h: Double)]) {
+            let fixed = items.compactMap { it in it.id.flatMap { id in overrides[id].map { (id, $0) } } }
             for (id, r) in fixed { rowOf[id] = r }
+            let free = items.filter { $0.id == nil || overrides[$0.id!] == nil }
+            let ys = fit(free.map(\.want), free.map(\.h))
             var next = 0.0
-            for (n, want) in wanted where overrides[n.id] == nil {
-                var y = max(want, next)
+            for (k, it) in free.enumerated() {
+                var y = max(ys[k], next)
                 var moved = true
                 while moved {
                     moved = false
-                    for (_, o) in fixed where y < o + 1 && y + 1 > o { y = o + 1; moved = true }
+                    for (_, o) in fixed where y < o + 1 && y + it.h > o { y = o + 1; moved = true }
                 }
-                rowOf[n.id] = y
-                next = y + 1
+                if let id = it.id { rowOf[id] = y }
+                next = y + it.h
             }
         }
-        for c in 0...maxCol {
+        func mean(_ list: [(String, Double)]?) -> (Double, Double)? {
+            let p = (list ?? []).compactMap { pair in rowOf[pair.0].map { ($0, pair.1) } }
+            let w = p.reduce(0) { $0 + $1.1 }
+            return w > 0 ? (p.reduce(0) { $0 + $1.0 * $1.1 } / w, w) : nil
+        }
+        let sourceCols = Set((0...maxCol).filter { c in
+            nodes.filter { col[$0.id] == c }.allSatisfy { (preds[$0.id] ?? []).isEmpty }
+        })
+        for c in sourceCols.sorted() {
+            // Source column: session (or group) order, with a gap between groups.
+            var y = 0.0
+            var lastGroup: Int?
+            var items: [(id: String?, want: Double, h: Double)] = []
+            for n in nodes.filter({ col[$0.id] == c }).sorted(by: { sortKey($0) < sortKey($1) }) {
+                let g = sortKey(n).0
+                if groupByGroups, let lg = lastGroup, lg != g { y += 0.6 }
+                lastGroup = g
+                items.append((n.id, y, 1))
+                y += 1
+            }
+            place(items)
+        }
+        func placeColumn(_ c: Int, refine: Bool) {
             let colNodes = nodes.filter { col[$0.id] == c }
-            if colNodes.allSatisfy({ (preds[$0.id] ?? []).allSatisfy { rowOf[$0] == nil } }) {
-                // Source column: session (or group) order, with a gap between groups.
-                var y = 0.0
-                var lastGroup: Int?
-                var wanted: [(GraphNode, Double)] = []
-                for n in colNodes.sorted(by: { sortKey($0) < sortKey($1) }) {
-                    let g = sortKey(n).0
-                    if groupByGroups, let lg = lastGroup, lg != g { y += 0.6 }
-                    lastGroup = g
-                    wanted.append((n, y))
-                    y += 1
+            var items: [(id: String?, want: Double, h: Double)] = colNodes.map { n in
+                let p = mean(preds[n.id])
+                var want = p?.0 ?? rowOf[n.id] ?? 0
+                if refine, let s = mean(succs[n.id]) {
+                    // Near the source first; where it goes counts for a third.
+                    let pw = (p?.1 ?? 0) * 2
+                    want = ((p?.0 ?? 0) * pw + s.0 * s.1) / (pw + s.1)
                 }
-                place(wanted)
-                continue
+                return (n.id, want, 1)
             }
-            func bary(_ n: GraphNode) -> Double {
-                let p = (preds[n.id] ?? []).compactMap { rowOf[$0] }
-                return p.isEmpty ? 0 : p.reduce(0, +) / Double(p.count)
+            if refine {
+                // Lines that pass this column reserve a little room, so blocks don't sit on them.
+                var seen = Set<String>()
+                for e in es where kindOf[e.from] != .deviceIn {
+                    guard let a = col[e.from], let b = col[e.to], a < c, c < b,
+                          let ra = rowOf[e.from], let rb = rowOf[e.to] else { continue }
+                    let y = ra + (rb - ra) * Double(c - a) / Double(b - a)
+                    guard seen.insert(e.to + "|" + String(Int((y * 2).rounded()))).inserted else { continue }
+                    items.append((nil, y - 0.25, 0.5))
+                }
             }
-            let pairs: [(GraphNode, Double)] = colNodes.map { n in (n, bary(n)) }
-            let sorted = pairs.sorted { (a: (GraphNode, Double), b: (GraphNode, Double)) -> Bool in
-                if a.1 == b.1 { return a.0.index < b.0.index }
-                return a.1 < b.1
+            let index = Dictionary(uniqueKeysWithValues: nodes.map { ($0.id, $0.index) })
+            items.sort { a, b in
+                a.want == b.want ? (a.id.flatMap { index[$0] } ?? -1) < (b.id.flatMap { index[$0] } ?? -1) : a.want < b.want
             }
-            place(sorted)
+            place(items)
+        }
+        let flowCols = (0...maxCol).filter { !sourceCols.contains($0) }
+        for c in flowCols { placeColumn(c, refine: false) }
+        for _ in 0..<2 {
+            for c in flowCols.reversed() { placeColumn(c, refine: true) }
+            for c in flowCols { placeColumn(c, refine: true) }
         }
         for i in nodes.indices {
             nodes[i].column = col[nodes[i].id] ?? 0
@@ -651,8 +907,8 @@ final class SessionModel: ObservableObject {
         var parts = n.outputs
         if let o = n.objectPath {
             let on = n.objectActive == true
-            parts = parts.map { on ? "\($0) (inactief)" : "\($0) [BED actief]" }
-            parts.append(on ? "\(o) [OBJ actief]" : "\(o) (inactief)")
+            parts = parts.map { on ? "\($0) (inactive)" : "\($0) [BED active]" }
+            parts.append(on ? "\(o) [OBJ active]" : "\(o) (inactive)")
         }
         return parts.isEmpty ? "—" : parts.joined(separator: ", ")
     }
@@ -688,7 +944,7 @@ final class SessionModel: ObservableObject {
         return out
     }
 
-    static func displayPath(_ p: String) -> String {
+    nonisolated static func displayPath(_ p: String) -> String {
         var s = p.trimmingCharacters(in: .whitespaces)
         while let f = s.first, "+<>".contains(f) { s.removeFirst(); s = s.trimmingCharacters(in: .whitespaces) }
         return s
@@ -738,7 +994,7 @@ final class PollWorker {
     private var lastTracks: [PTTrack]?
     private var lastName = ""
     private var ptslOK = false
-    private var ptslStatus = "Verbinden…"
+    private var ptslStatus = "Connecting…"
     private var rescanRequested = false
 
     func start() {
@@ -771,12 +1027,12 @@ final class PollWorker {
         // PTSL track list every ~2s (cheap on localhost, but no need to hammer Pro Tools).
         if tick % 3 == 0 {
             if ProToolsAX.proToolsPID == nil {
-                ptslOK = false; ptslStatus = "Pro Tools draait niet"; lastTracks = []; lastName = ""
+                ptslOK = false; ptslStatus = "Pro Tools is not running"; lastTracks = []; lastName = ""
             } else {
                 do {
                     lastName = try ptsl.sessionName()
                     lastTracks = try ptsl.trackList()
-                    ptslOK = true; ptslStatus = "PTSL verbonden"
+                    ptslOK = true; ptslStatus = "PTSL connected"
                 } catch {
                     ptslOK = false; ptslStatus = error.localizedDescription
                     lastTracks = []
@@ -823,7 +1079,7 @@ struct IOPathInfo: Equatable, Codable {
     var summary: String {
         var parts = [format, device].filter { !$0.isEmpty }
         if !channels.isEmpty { parts.append("ch \(channels)") }
-        if !active { parts.append("inactief") }
+        if !active { parts.append("inactive") }
         return parts.isEmpty ? "Hardware" : parts.joined(separator: " · ")
     }
 }

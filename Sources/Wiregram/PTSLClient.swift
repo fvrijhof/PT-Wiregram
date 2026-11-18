@@ -8,6 +8,8 @@ final class PTSLClient {
         case getTrackList = 3
         case hostReadyCheck = 13
         case getSessionName = 42
+        case getTransportState = 59
+        case togglePlayState = 64
         case registerConnection = 70
         case selectTracksByName = 73
         case setTrackHiddenState = 92
@@ -48,6 +50,17 @@ final class PTSLClient {
         return all
     }
 
+    /// The transport state as PTSL names it, e.g. "TS_TransportStopped" or "TS_TransportPlaying".
+    func transportState() throws -> String {
+        let json = try call(.getTransportState, body: nil)
+        return (json["current_setting"] as? String) ?? ""
+    }
+
+    /// Starts or stops playback (like the space bar).
+    func togglePlayState() throws {
+        _ = try call(.togglePlayState, body: nil)
+    }
+
     func selectedTrackNames() throws -> [String] {
         let body: [String: Any] = [
             "track_filter_list": [["filter": "Selected", "is_inverted": false]],
@@ -79,7 +92,7 @@ final class PTSLClient {
                                body: ["company_name": "Wiregram", "application_name": "Wiregram"],
                                session: "")
         guard let sid = json["session_id"] as? String else {
-            throw PTSLError(message: "RegisterConnection gaf geen session_id")
+            throw PTSLError(message: "RegisterConnection returned no session_id")
         }
         sessionID = sid
     }
@@ -119,7 +132,7 @@ final class PTSLClient {
 
         // TaskStatus: 3 = Completed
         if status != 3 {
-            var msg = "PTSL fout (status \(status))"
+            var msg = "PTSL error (status \(status))"
             if let d = errJSON.data(using: .utf8),
                let e = try? JSONSerialization.jsonObject(with: d) as? [String: Any],
                let m = e["command_error_message"] as? String { msg = m }
@@ -251,7 +264,7 @@ enum H2Unary {
                 connect(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
             }
         }
-        guard rc == 0 else { throw H2Error(message: "Pro Tools (PTSL) niet bereikbaar op poort \(port)") }
+        guard rc == 0 else { throw H2Error(message: "Pro Tools (PTSL) not reachable on port \(port)") }
 
         var out = Data("PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n".utf8)
         // SETTINGS: ENABLE_PUSH=0, INITIAL_WINDOW_SIZE=2^31-1
@@ -312,9 +325,9 @@ enum H2Unary {
             default: break
             }
         }
-        guard body.count >= 5 else { throw H2Error(message: "Leeg PTSL antwoord") }
+        guard body.count >= 5 else { throw H2Error(message: "Empty PTSL response") }
         let mlen = Int(body[1]) << 24 | Int(body[2]) << 16 | Int(body[3]) << 8 | Int(body[4])
-        guard body.count >= 5 + mlen else { throw H2Error(message: "Onvolledig PTSL antwoord") }
+        guard body.count >= 5 + mlen else { throw H2Error(message: "Incomplete PTSL response") }
         return body.subdata(in: 5..<(5 + mlen))
     }
 
@@ -346,7 +359,7 @@ enum H2Unary {
             var sent = 0
             while sent < data.count {
                 let n = send(fd, p.baseAddress! + sent, data.count - sent, 0)
-                if n <= 0 { throw H2Error(message: "Schrijven naar PTSL mislukt") }
+                if n <= 0 { throw H2Error(message: "Writing to PTSL failed") }
                 sent += n
             }
         }
@@ -357,7 +370,7 @@ enum H2Unary {
         var got = 0
         while got < count {
             let n = buf.withUnsafeMutableBytes { recv(fd, $0.baseAddress! + got, count - got, 0) }
-            if n <= 0 { throw H2Error(message: "Lezen van PTSL mislukt / timeout") }
+            if n <= 0 { throw H2Error(message: "Reading from PTSL failed / timeout") }
             got += n
         }
         return Data(buf)

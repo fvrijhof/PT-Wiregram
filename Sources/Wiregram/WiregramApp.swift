@@ -9,6 +9,11 @@ enum Entry {
             ProToolsAX.dumpTree(to: URL(fileURLWithPath: args[i + 1]))
             exit(0)
         }
+        // `Wiregram --transport`: prints the Pro Tools transport state (PTSL).
+        if args.contains("--transport") {
+            do { print(try PTSLClient().transportState()) } catch { print("error: \(error.localizedDescription)") }
+            exit(0)
+        }
         // `Wiregram --routing-test <file>` writes the parsed routing + timings.
         if let i = args.firstIndex(of: "--routing-test"), i + 1 < args.count {
             let ax = ProToolsAX()
@@ -70,7 +75,7 @@ enum Entry {
                 if let png = args.firstIndex(of: "--png").map({ args[$0 + 1] }) {
                     let zf = args.firstIndex(of: "--zoom").flatMap { Double(args[$0 + 1]) } ?? 1
                     let view = GraphContent(nodes: m.nodes, edges: m.edges, groups: m.groupByGroups ? m.groups : [],
-                                            colGap: m.focusID == nil ? Layout.colGap : Layout.focusColGap,
+                                            colGap: Layout.colGap,
                                             showGroupNames: args.contains("--info"), showInserts: args.contains("--info"),
                                             showVCA: args.contains("--info"), splitPrePost: true, scale: CGFloat(zf),
                                             lit: args.contains("--select") ? m.chain(of: m.nodes.first { $0.name == "SFX Aux" }?.id ?? "") : nil)
@@ -156,6 +161,40 @@ enum Entry {
             }
             exit(0)
         }
+        // `Wiregram --demo <png> [--tracks N] [--collapse routing|folder] [--sends all|selection|off]
+        //  [--bus-names] [--no-bundle] [--full] [--dark] [--zoom z] [--select name]`:
+        // render a synthetic post-production session (no Pro Tools needed).
+        if let i = args.firstIndex(of: "--demo"), i + 1 < args.count {
+            MainActor.assumeIsolated {
+                func opt(_ k: String) -> String? { args.firstIndex(of: k).flatMap { $0 + 1 < args.count ? args[$0 + 1] : nil } }
+                let n = opt("--tracks").flatMap(Int.init) ?? 60
+                let (tracks, routing) = DemoSession.make(sources: n)
+                let m = SessionModel()
+                m.collapseMode = opt("--collapse").flatMap(SessionModel.CollapseMode.init(rawValue:)) ?? .off
+                m.sendMode = opt("--sends").flatMap(SessionModel.SendMode.init(rawValue:)) ?? .all
+                m.inject(tracks: tracks, routing: routing)
+                if let f = opt("--focus") { m.focusID = m.nodes.first { $0.name == f }?.id }
+                let dark = args.contains("--dark")
+                let names = args.contains("--bus-names")
+                let lit = opt("--select").flatMap { s in m.nodes.first { $0.name == s }?.id }.map { m.chain(of: $0) }
+                let bundle = names || !args.contains("--no-bundle")
+                let view = GraphContent(nodes: m.nodes, edges: m.edges,
+                                        colGap: Layout.colGap + (bundle ? 50 : 0) + (names ? 90 : 0),
+                                        splitPrePost: true, scale: CGFloat(opt("--zoom").flatMap(Double.init) ?? 1), lit: lit,
+                                        sendMode: m.sendMode, bundle: bundle, showBusNames: names,
+                                        fullColor: args.contains("--full"),
+                                        onToggleCollapse: { _ in })
+                    .background(Palette.canvas(dark))
+                    .environment(\.colorScheme, dark ? .dark : .light)
+                if dark { NSAppearance.current = NSAppearance(named: .darkAqua) }
+                let r = ImageRenderer(content: view)
+                r.scale = 1
+                if let img = r.nsImage, let tiff = img.tiffRepresentation, let rep = NSBitmapImageRep(data: tiff),
+                   let d = rep.representation(using: .png, properties: [:]) { try? d.write(to: URL(fileURLWithPath: args[i + 1])) }
+                print("\(m.nodes.count) blocks, \(m.edges.count) edges")
+            }
+            exit(0)
+        }
         // `Wiregram --ptsl-test` prints the PTSL track list.
         if args.contains("--ptsl-test") {
             let c = PTSLClient()
@@ -171,29 +210,51 @@ enum Entry {
 
 struct WiregramApp: App {
     @StateObject private var model = SessionModel()
+    @StateObject private var updater = Updater.shared
 
     var body: some Scene {
         WindowGroup("PT Wiregram") {
             ContentView()
                 .environmentObject(model)
                 .frame(minWidth: 800, minHeight: 500)
-                .onAppear { model.start() }
+                .onAppear {
+                    // `Wiregram --demo-ui [tracks]`: run the app on a synthetic session instead of Pro Tools.
+                    let args = CommandLine.arguments
+                    if let i = args.firstIndex(of: "--demo-ui") {
+                        let n = i + 1 < args.count ? Int(args[i + 1]) ?? 300 : 300
+                        let (t, r) = DemoSession.make(sources: n)
+                        model.inject(tracks: t, routing: r)
+                    } else {
+                        model.start()
+                        updater.launch()
+                    }
+                }
+                .alert("Keep PT Wiregram up to date automatically?", isPresented: $updater.showPrompt) {
+                    Button("Turn On") { updater.enabled = true }
+                    Button("Not Now", role: .cancel) { updater.enabled = false }
+                } message: {
+                    Text("PT Wiregram can check GitHub once a day for a new version, download it in the background and install it when you quit the app. You can change this later in the PT Wiregram menu.")
+                }
         }
         .windowToolbarStyle(.unified)
         .commands {
+            CommandGroup(after: .appInfo) {
+                Button("Check for Updates…") { updater.check(manual: true) }
+                Toggle("Update Automatically", isOn: Binding(get: { updater.enabled == true }, set: { updater.enabled = $0 }))
+            }
             CommandGroup(after: .toolbar) {
-                Button("Opnieuw scannen") { model.refreshNow() }.keyboardShortcut("r")
+                Button("Rescan") { model.refreshNow() }.keyboardShortcut("r")
             }
             CommandGroup(replacing: .help) {
-                Button("Exporteer Atmos-diagnose…") {
+                Button("Export Atmos Diagnostics…") {
                     let url = FileManager.default.homeDirectoryForCurrentUser
-                        .appendingPathComponent("Desktop/PT Wiregram-Atmos-diagnose.txt")
+                        .appendingPathComponent("Desktop/PT Wiregram-Atmos-diagnostics.txt")
                     DispatchQueue.global().async {
                         ProToolsAX.atmosDump(to: url)
                         DispatchQueue.main.async { NSWorkspace.shared.activateFileViewerSelecting([url]) }
                     }
                 }
-                Button("Exporteer Accessibility-diagnose…") {
+                Button("Export Accessibility Diagnostics…") {
                     let url = FileManager.default.homeDirectoryForCurrentUser
                         .appendingPathComponent("Desktop/PT Wiregram-AX-dump.txt")
                     DispatchQueue.global().async {

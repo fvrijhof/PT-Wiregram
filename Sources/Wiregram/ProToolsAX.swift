@@ -296,7 +296,7 @@ final class ProToolsAX {
     /// Opens Setup ▸ I/O (if it isn't open), reads the Input and Output tabs, and closes the
     /// window again with Cancel so nothing is changed. Returns what was read.
     static func readIOViaDialog() throws -> [String: IOPathInfo] {
-        guard let pid = proToolsPID else { throw PTSLClient.PTSLError(message: "Pro Tools draait niet") }
+        guard let pid = proToolsPID else { throw PTSLClient.PTSLError(message: "Pro Tools is not running") }
         let app = AXUIElementCreateApplication(pid)
         AXUIElementSetMessagingTimeout(app, 3.0)
         func ioWindow() -> AXUIElement? {
@@ -305,13 +305,13 @@ final class ProToolsAX {
         var openedByUs = false
         if ioWindow() == nil {
             guard let item = menuItem(app, menu: "Setup", itemPrefix: "I/O") else {
-                throw PTSLClient.PTSLError(message: "Menu Setup ▸ I/O… niet gevonden")
+                throw PTSLClient.PTSLError(message: "Menu Setup ▸ I/O… not found")
             }
             AXUIElementPerformAction(item, kAXPressAction as CFString)
             openedByUs = true
             for _ in 0..<30 where ioWindow() == nil { Thread.sleep(forTimeInterval: 0.1) }
         }
-        guard let w = ioWindow() else { throw PTSLClient.PTSLError(message: "I/O Setup-venster ging niet open") }
+        guard let w = ioWindow() else { throw PTSLClient.PTSLError(message: "I/O Setup window did not open") }
         let kids = (attr(w, kAXChildrenAttribute) as? [AXUIElement]) ?? []
         func tab(_ prefix: String) -> AXUIElement? {
             kids.first { (attr($0, kAXRoleAttribute) as? String) == "AXRadioButton" && ((attr($0, kAXTitleAttribute) as? String) ?? "").hasPrefix(prefix + " ") }
@@ -408,7 +408,7 @@ final class ProToolsAX {
             if !rows.isEmpty { break }
         }
         guard !rows.isEmpty else {
-            throw PTSLClient.PTSLError(message: "Geen Group List gevonden. Open het Mix-venster met de Groups-lijst zichtbaar.")
+            throw PTSLClient.PTSLError(message: "No Group List found. Open the Mix window with the Groups list visible.")
         }
 
         let original = try ptsl.selectedTrackNames()
@@ -501,16 +501,16 @@ final class ProToolsAX {
     static func atmosDump(to url: URL) {
         var out = "PT Wiregram Atmos-diagnose · \(Date())\ntrusted=\(isTrusted)\n"
         guard let pid = proToolsPID else {
-            try? (out + "Pro Tools draait niet\n").write(to: url, atomically: true, encoding: .utf8); return
+            try? (out + "Pro Tools is not running\n").write(to: url, atomically: true, encoding: .utf8); return
         }
         let app = AXUIElementCreateApplication(pid)
         AXUIElementSetMessagingTimeout(app, 3.0)
         let windows = (attr(app, kAXWindowsAttribute) as? [AXUIElement]) ?? []
 
-        out += "\n== Pro Tools-vensters\n"
+        out += "\n== Pro Tools windows\n"
         for w in windows { out += "  \((attr(w, kAXTitleAttribute) as? String) ?? "?")\n" }
 
-        out += "\n== Menu-items met Atmos/Renderer/Object/Bed\n"
+        out += "\n== Menu items with Atmos/Renderer/Object/Bed\n"
         if let bar = attr(app, kAXMenuBarAttribute).map({ $0 as! AXUIElement }) {
             func walk(_ e: AXUIElement, _ path: String, _ d: Int) {
                 if d > 4 { return }
@@ -524,7 +524,7 @@ final class ProToolsAX {
             walk(bar, "", 0)
         }
 
-        out += "\n== Mix-strips: I/O-sectie en alles met Atmos/Object/Bed\n"
+        out += "\n== Mix strips: I/O section and everything with Atmos/Object/Bed\n"
         if let mix = windows.first(where: { ((attr($0, kAXTitleAttribute) as? String) ?? "").hasPrefix("Mix") }) {
             for strip in (attr(mix, kAXChildrenAttribute) as? [AXUIElement]) ?? [] {
                 let st = (attr(strip, kAXTitleAttribute) as? String) ?? ""
@@ -539,7 +539,7 @@ final class ProToolsAX {
                 }
                 out += "  STRIP \(st)\n" + part
             }
-        } else { out += "  (Mix-venster niet open)\n" }
+        } else { out += "  (Mix window not open)\n" }
 
         out += "\n== I/O Setup ▸ Dolby Atmos-tab\n"
         func ioWindow() -> AXUIElement? {
@@ -558,15 +558,15 @@ final class ProToolsAX {
                 AXUIElementPerformAction(tab, kAXPressAction as CFString)
                 Thread.sleep(forTimeInterval: 0.6)
                 dump(w, 1, 10, &out)
-            } else { out += "  (geen Dolby Atmos-tab gevonden)\n" }
+            } else { out += "  (no Dolby Atmos tab found)\n" }
             if opened {
                 if let cancel = kids.first(where: { (attr($0, kAXTitleAttribute) as? String) == "Cancel" }) {
                     AXUIElementPerformAction(cancel, kAXPressAction as CFString)
                 }
             } else if let original { AXUIElementPerformAction(original, kAXPressAction as CFString) }
-        } else { out += "  (I/O Setup kon niet geopend worden)\n" }
+        } else { out += "  (I/O Setup could not be opened)\n" }
 
-        out += "\n== Pro Tools-vensters met Atmos/Renderer in de titel\n"
+        out += "\n== Pro Tools windows with Atmos/Renderer in the title\n"
         for w in (attr(app, kAXWindowsAttribute) as? [AXUIElement]) ?? [] {
             let t = (attr(w, kAXTitleAttribute) as? String) ?? ""
             if t.range(of: "atmos|renderer", options: [.regularExpression, .caseInsensitive]) != nil { dump(w, 1, 10, &out) }
@@ -576,7 +576,7 @@ final class ProToolsAX {
         let renderers = NSWorkspace.shared.runningApplications.filter {
             ($0.localizedName ?? "").range(of: "atmos|renderer", options: [.regularExpression, .caseInsensitive]) != nil
         }
-        if renderers.isEmpty { out += "  (geen draaiende Dolby Atmos Renderer-app)\n" }
+        if renderers.isEmpty { out += "  (no running Dolby Atmos Renderer app)\n" }
         for r in renderers {
             out += "  APP \(r.localizedName ?? "?") (\(r.bundleIdentifier ?? "?"))\n"
             let ra = AXUIElementCreateApplication(r.processIdentifier)
@@ -595,7 +595,7 @@ final class ProToolsAX {
                 dump(w, 0, maxDepth, &out)
             }
         } else {
-            out += "Pro Tools draait niet\n"
+            out += "Pro Tools is not running\n"
         }
         try? out.write(to: url, atomically: true, encoding: .utf8)
     }
