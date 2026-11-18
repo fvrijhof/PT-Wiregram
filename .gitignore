@@ -1,0 +1,10 @@
+# macOS
+.DS_Store
+
+# SwiftPM build output
+.build/
+.swiftpm/
+
+# Built app (create with ./build.sh; attach to GitHub Releases instead)
+PT Wiregram.app/
+*.zip
