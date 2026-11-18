@@ -12,7 +12,7 @@ It reads the session through two channels:
 
 ## Download
 
-Get `PT Wiregram.zip` from the [latest release](https://github.com/fvrijhof/PT-Wiregram/releases/latest),
+Get `PT.Wiregram.zip` from the [latest release](https://github.com/fvrijhof/PT-Wiregram/releases/latest),
 unzip it and move `PT Wiregram.app` to your Applications folder. It runs natively on Apple
 silicon and Intel Macs.
 
