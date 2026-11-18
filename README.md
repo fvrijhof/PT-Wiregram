@@ -10,6 +10,19 @@ It reads the session through two channels:
 - **Accessibility API** — reads routing (inputs, outputs, sends, inserts) and I/O setup
   from the Pro Tools mix window.
 
+## Download
+
+Get `PT Wiregram.zip` from the [latest release](https://github.com/fvrijhof/PT-Wiregram/releases/latest),
+unzip it and move `PT Wiregram.app` to your Applications folder. It runs natively on Apple
+silicon and Intel Macs.
+
+**First launch:** the app is not notarized by Apple, so macOS will block it the first time.
+Right-click the app and choose **Open**, then confirm. Or open it once, then go to
+System Settings → Privacy & Security and click **Open Anyway**.
+
+Then give PT Wiregram Accessibility access (see below) and make sure Pro Tools is running
+with a session open.
+
 ## Requirements
 
 - macOS 13 or later
@@ -17,7 +30,7 @@ It reads the session through two channels:
 - Accessibility permission for PT Wiregram (System Settings → Privacy & Security → Accessibility)
 - To build: Xcode Command Line Tools (`xcode-select --install`); full Xcode is not needed
 
-## Build
+## Build from source
 
 ```bash
 ./build.sh
