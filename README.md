@@ -60,3 +60,7 @@ The binary accepts a few flags for debugging, for example:
 ```
 
 Pro Tools is a trademark of Avid Technology. This project is not affiliated with Avid.
+
+## License
+
+MIT — see [LICENSE](LICENSE).
