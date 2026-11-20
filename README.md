@@ -44,6 +44,8 @@ See [CHANGELOG.md](CHANGELOG.md) for what's new.
 
 From version 1.1 on, PT Wiregram can update itself. On first launch it asks whether to do this
 automatically. You can change that later, or run **Check for Updates…**, from the PT Wiregram menu.
+On a Mac where PT Wiregram isn't allowed to replace itself (for example when an administrator
+installed it), installing an update asks for an administrator name and password (from 1.2.1 on).
 Version 1.0 has no updater: install 1.1 once by hand.
 
 ## Requirements

@@ -309,7 +309,9 @@ struct ContentView: View {
     private func updateBanner(_ version: String) -> some View {
         HStack(spacing: 10) {
             Image(systemName: "arrow.down.circle.fill").foregroundStyle(.green)
-            Text("PT Wiregram \(version) has been downloaded. It installs when you quit the app.")
+            Text(updater.needsAdmin
+                 ? "PT Wiregram \(version) has been downloaded. Installing it needs an administrator name and password."
+                 : "PT Wiregram \(version) has been downloaded. It installs when you quit the app.")
             Spacer()
             Button("Relaunch to Update") { updater.relaunchToUpdate() }
         }

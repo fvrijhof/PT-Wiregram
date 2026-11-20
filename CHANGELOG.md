@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.2.1
+
+### Updates
+- **Updating on managed Macs:** when PT Wiregram isn't allowed to replace itself (e.g. installed by an administrator or Jamf in the Applications folder), **Relaunch to Update** now asks for an administrator name and password in the standard macOS dialog. PT Wiregram never sees the password. If you cancel, the current version stays; if installing fails, the old version is put back and you can open the download page.
+- An update that needs a password is never installed while quitting, so no password dialog appears when you log out or shut down.
+
 ## 1.2
 
 ### Follows Pro Tools

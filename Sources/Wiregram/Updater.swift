@@ -36,6 +36,10 @@ final class Updater: ObservableObject {
     @Published var showPrompt = false
 
     private var staged: URL?
+    /// The folder with the app isn't writable for this user (e.g. /Applications on a managed Mac):
+    /// installing then asks for an administrator name and password (macOS' own dialog).
+    @Published private(set) var needsAdmin = false
+    private var stagedPage: URL?
     private var timer: Timer?
 
     /// The running version (from Info.plist); nil when running outside the app bundle.
@@ -153,9 +157,10 @@ final class Updater: ObservableObject {
         // Make sure the new app is intact before it replaces this one.
         try run("/usr/bin/codesign", ["--verify", "--deep", app.path])
         try? run("/usr/bin/xattr", ["-dr", "com.apple.quarantine", app.path])
-        guard FileManager.default.isWritableFile(atPath: Bundle.main.bundleURL.deletingLastPathComponent().path) else {
-            throw UpdateError("PT Wiregram can't replace itself in \(Bundle.main.bundleURL.deletingLastPathComponent().path). Move it to your Applications folder, or download the update from GitHub.")
-        }
+        let folder = Bundle.main.bundleURL.deletingLastPathComponent().path
+        needsAdmin = !(FileManager.default.isWritableFile(atPath: folder)
+                       && FileManager.default.isWritableFile(atPath: Bundle.main.bundlePath))
+        stagedPage = release.page
         staged = app
         state = .ready(release.version)
     }
@@ -165,11 +170,53 @@ final class Updater: ObservableObject {
     /// Quits, swaps in the new version and opens it.
     func relaunchToUpdate() {
         guard staged != nil else { return }
+        if needsAdmin {
+            guard installAsAdmin() else { return }
+            reopenAfterQuit()
+            NSApp.terminate(nil)
+            return
+        }
         swap(reopen: true)
         NSApp.terminate(nil)
     }
 
-    private func installStagedOnQuit() { if staged != nil { swap(reopen: false) } }
+    /// On quit only an update that needs no password is installed; one that needs a password
+    /// waits for "Relaunch to Update" (no password dialog while the app or the Mac shuts down).
+    private func installStagedOnQuit() { if staged != nil && !needsAdmin { swap(reopen: false) } }
+
+    /// Replaces the app with administrator rights. macOS shows its own password dialog;
+    /// PT Wiregram never sees the password. Only the two moves run as administrator.
+    private func installAsAdmin() -> Bool {
+        guard let new = staged else { return false }
+        let dest = Bundle.main.bundlePath
+        func q(_ s: String) -> String { "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'" }
+        let old = dest + ".old-\(ProcessInfo.processInfo.processIdentifier)"
+        let shell = "/bin/mv \(q(dest)) \(q(old)) && /bin/mv \(q(new.path)) \(q(dest)) && /bin/rm -rf \(q(old))"
+            + " || { [ -d \(q(old)) ] && [ ! -d \(q(dest)) ] && /bin/mv \(q(old)) \(q(dest)); exit 1; }"
+        let escaped = shell.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"")
+        let source = "do shell script \"\(escaped)\" with prompt \"PT Wiregram wants to install an update.\" with administrator privileges"
+        var error: NSDictionary?
+        NSAppleScript(source: source)?.executeAndReturnError(&error)
+        guard let error else { staged = nil; return true }
+        if (error[NSAppleScript.errorNumber] as? Int) == -128 { return false } // cancelled
+        let a = NSAlert()
+        a.messageText = "The update couldn't be installed"
+        a.informativeText = (error[NSAppleScript.errorMessage] as? String ?? "Unknown error.")
+            + "\n\nYou can download the new version from GitHub and install it by hand."
+        a.addButton(withTitle: "Open Download Page")
+        a.addButton(withTitle: "Close")
+        if a.runModal() == .alertFirstButtonReturn, let page = stagedPage { NSWorkspace.shared.open(page) }
+        return false
+    }
+
+    /// Opens the (new) app once this process has quit.
+    private func reopenAfterQuit() {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/bin/sh")
+        p.arguments = ["-c", "while kill -0 \"$0\" 2>/dev/null; do sleep 0.2; done; /usr/bin/open \"$1\"",
+                       String(ProcessInfo.processInfo.processIdentifier), Bundle.main.bundlePath]
+        try? p.run()
+    }
 
     /// A small script waits until this process has quit, then replaces the app bundle.
     private func swap(reopen: Bool) {
