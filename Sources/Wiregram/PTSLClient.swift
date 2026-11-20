@@ -36,11 +36,10 @@ final class PTSLClient {
         var all: [PTTrack] = []
         var offset = 0
         while true {
-            let body: [String: Any] = [
-                "track_filter_list": [["filter": "All", "is_inverted": false]],
+            let json = try callTrying(.getTrackList, ["All", "TLFilter_All"]) { filter in [
+                "track_filter_list": [["filter": filter, "is_inverted": false]],
                 "pagination_request": ["limit": 500, "offset": offset],
-            ]
-            let json = try call(.getTrackList, body: body)
+            ] }
             let list = (json["track_list"] as? [[String: Any]]) ?? []
             all += list.map(PTTrack.init(json:))
             let total = ((json["pagination_response"] as? [String: Any])?["total"] as? Int) ?? all.count
@@ -62,17 +61,17 @@ final class PTSLClient {
     }
 
     func selectedTrackNames() throws -> [String] {
-        let body: [String: Any] = [
-            "track_filter_list": [["filter": "Selected", "is_inverted": false]],
+        let json = try callTrying(.getTrackList, ["Selected", "TLFilter_Selected"]) { filter in [
+            "track_filter_list": [["filter": filter, "is_inverted": false]],
             "pagination_request": ["limit": 1000, "offset": 0],
-        ]
-        let json = try call(.getTrackList, body: body)
+        ] }
         return ((json["track_list"] as? [[String: Any]]) ?? []).compactMap { $0["name"] as? String }
     }
 
     func selectTracks(_ names: [String]) throws {
-        _ = try call(.selectTracksByName, body: ["track_names": names, "selection_mode": "SM_Replace",
-                                                  "pagination_request": ["limit": 1000, "offset": 0]])
+        _ = try callTrying(.selectTracksByName, ["SM_Replace", "SMode_Replace"]) { mode in
+            ["track_names": names, "selection_mode": mode, "pagination_request": ["limit": 1000, "offset": 0]]
+        }
     }
 
     func setOpen(_ names: [String], open: Bool) throws {
@@ -85,6 +84,25 @@ final class PTSLClient {
     }
 
     // MARK: Request plumbing
+
+    /// Newer PTSL versions add prefixed names for enum values ("All" → "TLFilter_All",
+    /// "SM_Replace" → "SMode_Replace"). Sends the classic name first and, if Pro Tools
+    /// rejects the request, the newer one, so old and new Pro Tools versions both work.
+    private var preferNewNames = false
+    private func callTrying(_ cmd: Command, _ names: [String], body: (String) -> [String: Any]) throws -> [String: Any] {
+        let order = preferNewNames ? names.reversed() : names
+        var lastError: Error?
+        for (k, name) in order.enumerated() {
+            do {
+                let r = try call(cmd, body: body(name))
+                if k > 0 { preferNewNames.toggle() }
+                return r
+            } catch let e as PTSLError {
+                lastError = e // Pro Tools answered but rejected it: try the other name.
+            }
+        }
+        throw lastError!
+    }
 
     private func ensureRegistered() throws {
         if sessionID != nil { return }
@@ -160,18 +178,34 @@ struct PTTrack: Hashable {
     let isMuted: Bool
     let isSoloed: Bool
 
+    /// Unprefixed aliases newer PTSL versions may send for track types.
+    static let plainTypes = ["Unknown": "TT_Unknown", "Midi": "TT_Midi", "AudioTrack": "TT_Audio", "Aux": "TT_Aux",
+                             "VideoTrack": "TT_Video", "Vca": "TT_Vca", "Instrument": "TT_Instrument",
+                             "Master": "TT_Master", "BasicFolder": "TT_BasicFolder", "RoutingFolder": "TT_RoutingFolder"]
+    /// Maps PTSL enum names to the classic form the app compares against ("TType_Aux" → "TT_Aux").
+    static func canonical(_ v: String, prefix: String, newPrefix: String, plain: [String: String]) -> String {
+        if v.hasPrefix(newPrefix) { return prefix + v.dropFirst(newPrefix.count) }
+        return plain[v] ?? v
+    }
+
     init(json: [String: Any]) {
         id = json["id"] as? String ?? UUID().uuidString
         name = json["name"] as? String ?? "?"
-        type = json["type"] as? String ?? "TT_Unknown"
+        type = Self.canonical(json["type"] as? String ?? "TT_Unknown", prefix: "TT_",
+                              newPrefix: "TType_", plain: Self.plainTypes)
         index = json["index"] as? Int ?? 0
         color = json["color"] as? String ?? "#ff808080"
-        format = json["format"] as? String ?? ""
+        format = Self.canonical(json["format"] as? String ?? "", prefix: "TF_", newPrefix: "TFormat_", plain: [:])
         parentFolderID = json["parent_folder_id"] as? String ?? ""
         let attrs = json["track_attributes"] as? [String: Any] ?? [:]
-        isInactive = (attrs["is_inactive"] as? String ?? "None") != "None"
-        isHidden = (attrs["is_hidden"] as? String ?? "None") != "None"
-        isHiddenExplicitly = (attrs["is_hidden"] as? String ?? "").hasPrefix("SetExplicitly")
+        // "None", "SetExplicitly", … (newer PTSL may say "TAState_None", "TAState_SetExplicitly").
+        func state(_ k: String) -> String {
+            let v = attrs[k] as? String ?? "None"
+            return v.hasPrefix("TAState_") ? String(v.dropFirst(8)) : v
+        }
+        isInactive = !["None", "Unknown"].contains(state("is_inactive"))
+        isHidden = !["None", "Unknown"].contains(state("is_hidden"))
+        isHiddenExplicitly = state("is_hidden").hasPrefix("SetExplicitly")
         isOpen = attrs["is_open"] as? Bool ?? true
         isMuted = attrs["is_muted"] as? Bool ?? false
         isSoloed = attrs["is_soloed"] as? Bool ?? false

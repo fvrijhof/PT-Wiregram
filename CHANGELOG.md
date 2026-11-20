@@ -1,5 +1,41 @@
 # Changelog
 
+## 1.2
+
+### Follows Pro Tools
+- **Match Pro Tools** (on at launch): folders are open or closed and tracks are hidden exactly as in Pro Tools. Turn it off, or open a folder in PT Wiregram, to read the whole session (after one notice).
+- **Closed folders** are shown as one block, as in Pro Tools. Click ⊕ to open it in PT Wiregram.
+- Tracks inside closed folders are now read as well.
+
+### Colours
+- **Bus colours from I/O Setup:** a bus that has a colour in Pro Tools' I/O Setup draws its lines in that colour. Choose between track colours and bus colours in Settings. PT Wiregram reads the colours from Pro Tools' saved I/O settings, so no extra permission is needed. Changes show up after you click OK in I/O Setup.
+
+### Settings (⌘,)
+- **General:** appearance, Match Pro Tools at launch, notices before reading, automatic updates.
+- **Graph:** track or bus colours, grey for buses without a colour, pre-fader send marks, stripe or whole-block track colour, zoom when opening, and whether bus columns are counted from the outputs or from the sources.
+- **Pro Tools:** how often PT Wiregram refreshes, from every second to every 30 minutes, or only when you click Rescan. A longer interval keeps Pro Tools lighter in large sessions. Also: stop playback before reading, and read hidden tracks when a session opens.
+- **Export and import settings** as a file, e.g. to set up every Mac in a studio the same way.
+- Settings fixed by an organisation with a configuration profile (e.g. Jamf) are shown as locked.
+
+### Developer mode
+- Switch it on in Settings → Developer. A **Developer** menu appears with demo sessions that work without Pro Tools, read-only diagnostic exports for bug reports, version and status info, and the command-line options.
+- The Help menu now links to the project on GitHub and to issue reporting.
+
+### Views
+- **View bar** with toggle buttons for all view settings (View → Show View Bar).
+- **Pre Sends** and **Post Sends** can be shown or hidden separately.
+- **Activity bar** at the top shows what PT Wiregram is reading and the result, and hides itself.
+
+### Layout
+- **Buses sit next to their sources.** A bus fed by a single folder or a single send was sometimes placed far away, near where its signal goes next. Lines that run together no longer push blocks out of place.
+- **Dragged blocks move with their sources** when folders open or close. Positions dragged in 1.1 are reset once.
+
+### Compatibility
+- Prepared for newer Pro Tools versions that use new names in the scripting interface (PTSL).
+
+### Diagnostics
+- New read-only command-line flags `--folder-diag`, `--transport` and `--pio-colors`.
+
 ## 1.1
 
 ### Large sessions

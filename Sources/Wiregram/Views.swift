@@ -24,6 +24,7 @@ enum Pref {
     static let busNames = "showBusNames"
     static let bundle = "bundleLines"
     static let minimap = "showMinimap"
+    static let viewBar = "showViewBar"
 }
 
 struct ContentView: View {
@@ -38,6 +39,8 @@ struct ContentView: View {
     @AppStorage(Pref.busNames) private var showBusNames = false
     @AppStorage(Pref.bundle) private var bundleLines = true
     @AppStorage(Pref.minimap) private var showMinimap = true
+    @AppStorage(Pref.viewBar) private var showViewBar = true
+    @AppStorage("defaultZoom") private var defaultZoom = 1.0
     @State private var scrollMonitor: Any?
     @State private var dismissedNotices: Set<String> = []
     @ObservedObject private var updater = Updater.shared
@@ -47,6 +50,7 @@ struct ContentView: View {
             if !model.axTrusted { accessBanner }
             ForEach(unreadNotices, id: \.key) { readNotice($0) }
             if case .ready(let v) = updater.state { updateBanner(v) }
+            if tab == 0 && showViewBar { viewBar; Divider() }
             Group {
                 switch tab {
                 case 0: GraphView(zoom: $zoom, handTool: $handTool)
@@ -55,8 +59,9 @@ struct ContentView: View {
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .overlay(alignment: .top) { ActivityBar() }
             .onAppear(perform: installScrollZoom)
-            .onAppear { Appearance.apply(appearance) }
+            .onAppear { Appearance.apply(appearance); zoom = defaultZoom }
             .onChange(of: appearance) { Appearance.apply($0) }
             .onDisappear { if let m = scrollMonitor { NSEvent.removeMonitor(m); scrollMonitor = nil } }
             Divider()
@@ -113,45 +118,102 @@ struct ContentView: View {
         .searchable(text: $model.search, prompt: "Search track or bus")
     }
 
+    /// The view settings that aren't on the view bar, plus a switch for the bar itself.
     private var viewMenu: some View {
         Menu {
-            Picker("Send Lines", selection: $model.sendMode) {
-                Text("All").tag(SessionModel.SendMode.all)
-                Text("Only for Selected Track").tag(SessionModel.SendMode.selection)
-                Text("Hidden").tag(SessionModel.SendMode.off)
-            }
-            Toggle("Distinguish Pre- and Post-Fader Sends", isOn: $model.splitPrePost).disabled(!model.showSends)
-            Toggle("Bundle Lines per Bus", isOn: $bundleLines).disabled(showBusNames)
-            Toggle("Show Bus Names", isOn: $showBusNames)
+            Toggle("Show View Bar", isOn: $showViewBar)
             Divider()
-            Picker("Collapse Tracks", selection: $model.collapseMode) {
-                Text("Off").tag(SessionModel.CollapseMode.off)
-                Text("With Identical Routing").tag(SessionModel.CollapseMode.routing)
-                Text("By Folder").tag(SessionModel.CollapseMode.folder)
-                Text("By Group").tag(SessionModel.CollapseMode.group)
-            }
             Button("Collapse All Again") { model.collapseAll() }.disabled(model.collapseMode == .off || model.expanded.isEmpty)
-            Toggle("Arrange Sources by Group", isOn: $model.groupByGroups)
             Button("Reset Block Positions") { model.resetRowOverrides() }.disabled(!model.hasRowOverrides)
             Divider()
-            Picker("Track Color", selection: $trackFill) {
-                Text("Color Stripe").tag("stripe")
-                Text("Full Block").tag("full")
-            }
-            Toggle("Show Legend", isOn: $showLegend)
-            Toggle("Show Minimap", isOn: $showMinimap)
-            Picker("Appearance", selection: $appearance) {
-                Text("System").tag("system")
-                Text("Light").tag("light")
-                Text("Dark").tag("dark")
-            }
-            Divider()
-            Text("Show in Blocks")
-            Toggle("Group Names", isOn: $model.showGroupNames)
-            Toggle("Inserts", isOn: $model.showInserts)
-            Toggle("VCA Assignment", isOn: $model.showVCA)
+            OpenSettingsButton()
         } label: { Label("View", systemImage: "slider.horizontal.3") }
             .labelStyle(.titleAndIcon)
+    }
+
+    // MARK: View bar
+
+    /// All view settings as buttons, so you can see at a glance what is switched on.
+    /// A highlighted button is on; settings with more than two choices are small menus.
+    private var viewBar: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 6) {
+                barLabel("Tracks")
+                barToggle("Match Pro Tools", "rectangle.on.rectangle",
+                          Binding(get: { model.followProTools }, set: { model.setFollowProTools($0) }),
+                          help: "On: folders and hidden tracks as in Pro Tools. Off: the whole session, with every folder open; PT Wiregram first reads what Pro Tools doesn't show.")
+                barDivider
+                barLabel("Lines")
+                barMenu(icon: "arrow.triangle.branch", title: "Sends: " + sendTitle, active: model.sendMode != .all) {
+                    Picker("Send Lines", selection: $model.sendMode) {
+                        Text("All").tag(SessionModel.SendMode.all)
+                        Text("Only for Selected Track").tag(SessionModel.SendMode.selection)
+                        Text("Hidden").tag(SessionModel.SendMode.off)
+                    }.pickerStyle(.inline)
+                }
+                .help("Which send lines are drawn")
+                barToggle("Pre Sends", "circle.dotted", $model.showPreSends, help: "Show pre-fader sends")
+                    .disabled(!model.showSends)
+                barToggle("Post Sends", "circle.dashed", $model.showPostSends, help: "Show post-fader sends")
+                    .disabled(!model.showSends)
+                barToggle("Bundle", "point.3.filled.connected.trianglepath.dotted", $bundleLines, help: "Combine lines into rails per bus")
+                    .disabled(showBusNames)
+                barToggle("Bus Names", "textformat", $showBusNames, help: "Show bus names on the lines")
+                barDivider
+                barLabel("Blocks")
+                barMenu(icon: "square.stack.3d.down.right", title: "Collapse: " + collapseTitle, active: model.collapseMode != .off) {
+                    Picker("Collapse Tracks", selection: $model.collapseMode) {
+                        Text("Off").tag(SessionModel.CollapseMode.off)
+                        Text("With Identical Routing").tag(SessionModel.CollapseMode.routing)
+                        Text("By Folder").tag(SessionModel.CollapseMode.folder)
+                        Text("By Group").tag(SessionModel.CollapseMode.group)
+                    }.pickerStyle(.inline)
+                    Button("Collapse All Again") { model.collapseAll() }.disabled(model.collapseMode == .off || model.expanded.isEmpty)
+                }
+                .help("Show several tracks as one stacked block")
+                barToggle("By Group", "rectangle.3.group", $model.groupByGroups, help: "Arrange sources by Pro Tools group")
+                barMenu(icon: "paintpalette", title: trackFill == "full" ? "Color: Full" : "Color: Stripe", active: false) {
+                    Picker("Track Color", selection: $trackFill) {
+                        Text("Color Stripe").tag("stripe")
+                        Text("Full Block").tag("full")
+                    }.pickerStyle(.inline)
+                }
+                .help("How track colors are shown")
+                barToggle("Group Names", "tag", $model.showGroupNames, help: "Show group names in the blocks")
+                barToggle("Inserts", "rectangle.split.3x1", $model.showInserts, help: "Show inserts in the blocks")
+                barToggle("VCA", "slider.vertical.3", $model.showVCA, help: "Show VCA assignment in the blocks")
+                barDivider
+                barToggle("Legend", "list.bullet.rectangle", $showLegend, help: "Show the legend")
+                barToggle("Minimap", "map", $showMinimap, help: "Show the minimap")
+            }
+            .padding(.horizontal, 10).padding(.vertical, 5)
+        }
+        .controlSize(.small)
+        .background(.bar)
+    }
+
+    private var sendTitle: String {
+        switch model.sendMode { case .all: return "All"; case .selection: return "Selected"; case .off: return "Hidden" }
+    }
+    private var collapseTitle: String {
+        switch model.collapseMode {
+        case .off: return "Off"; case .routing: return "Identical"; case .folder: return "Folder"; case .group: return "Group"
+        }
+    }
+    private func barLabel(_ t: String) -> some View {
+        Text(t.uppercased()).font(.system(size: 9, weight: .semibold)).foregroundStyle(.secondary).padding(.trailing, 2)
+    }
+    private var barDivider: some View { Divider().frame(height: 16).padding(.horizontal, 4) }
+    private func barToggle(_ title: String, _ icon: String, _ on: Binding<Bool>, help: String) -> some View {
+        Toggle(isOn: on) { Label(title, systemImage: icon) }
+            .toggleStyle(.button)
+            .help(help)
+    }
+    private func barMenu<C: View>(icon: String, title: String, active: Bool, @ViewBuilder content: () -> C) -> some View {
+        Menu { content() } label: { Label(title, systemImage: icon) }
+            .menuStyle(.button)
+            .tint(active ? .accentColor : nil)
+            .fixedSize()
     }
 
     /// Option + scroll wheel zooms: the graph around the mouse pointer, the table's text size.
@@ -211,11 +273,13 @@ struct ContentView: View {
         if model.groupByGroups { needGroups.append("arranging by group") }
         if !needGroups.isEmpty && model.groups.isEmpty {
             add("groups", "The groups of this session haven't been read yet, so \(needGroups.joined(separator: ", ")) can't be shown.",
-                model.groupStatus, model.readGroups)
+                model.groupStatus, { model.readGroups() })
         }
-        if !model.hideHidden && model.hasUnreadHiddenTracks {
-            add("hidden", "The routing of hidden tracks hasn't been read yet, so they are shown without connections.",
-                model.hiddenStatus, model.readHiddenTracks)
+        // In the Pro Tools view, closed folders are expected; only nag once the user left it.
+        if !model.followProTools && model.unreadFolderTracks > 0 {
+            let n = model.unreadFolderTracks
+            add("hidden", "The routing of \(n) track\(n == 1 ? "" : "s") in closed folders or hidden by Pro Tools hasn't been read yet, so \(n == 1 ? "it is" : "they are") shown without connections.",
+                model.hiddenStatus, { model.readEverything() })
         }
         if model.showDevices && model.ioPaths.isEmpty {
             add("io", "The I/O Setup hasn't been read yet, so hardware inputs and output paths can't be shown.",
@@ -408,16 +472,18 @@ struct GraphView: View {
                 }
             }
             .overlay(alignment: .topTrailing) {
-                if model.hasRowOverrides {
-                    Button { model.resetRowOverrides() } label: {
-                        Label("Reset Block Positions", systemImage: "arrow.uturn.backward")
+                HStack(spacing: 8) {
+                    if model.hasRowOverrides {
+                        Button { model.resetRowOverrides() } label: {
+                            Label("Reset Block Positions", systemImage: "arrow.uturn.backward")
+                        }
+                        .help("Put the blocks you dragged back in their automatic position")
                     }
-                    .controlSize(.large)
-                    .buttonStyle(.borderedProminent)
-                    .help("Put the blocks you dragged back in their automatic position")
-                    .onHover { pan.overOverlay = $0 }
-                    .padding(10)
                 }
+                .controlSize(.large)
+                .buttonStyle(.borderedProminent)
+                .onHover { pan.overOverlay = $0 }
+                .padding(10)
             }
             .overlay(alignment: .bottomTrailing) {
                 if showMinimap && model.focusID == nil {
@@ -658,6 +724,12 @@ struct GraphContent: View {
         var pre: Bool
     }
 
+    /// The I/O Setup colour of the bus these lines carry, when they all carry the same one.
+    private func busColor(_ es: [GraphEdge]) -> Color? {
+        guard let c = es.first?.busColor, es.allSatisfy({ $0.busColor == c }) else { return nil }
+        return c.readable(dark: dark)
+    }
+
     private func style(_ e: GraphEdge, from a: GraphNode) -> EdgeStyle {
         let on = lit == nil || (lit!.contains(e.from) && lit!.contains(e.to))
         let color = (a.kind == .track ? a.color : Color.gray).readable(dark: dark)
@@ -751,7 +823,8 @@ struct GraphContent: View {
             let off = (CGFloat(i) - CGFloat(n - 1) / 2) * spacing
             let p0 = start(e, fa)
             let p1 = CGPoint(x: fb.minX, y: fb.midY + off)
-            let s = style(e, from: a)
+            var s = style(e, from: a)
+            if let c = busColor([e]) { s.color = c }
             strokeEdge(ctx, curve(p0, p1), s, muted: e.muted)
             arrowHead(ctx, at: p1, color: s.color.opacity(s.on ? 0.95 : 0.07))
             if s.pre && s.on { preTag(ctx, at: p0, muted: e.muted) }
@@ -815,7 +888,7 @@ struct GraphContent: View {
             let styles = es.compactMap { e in byID[e.from].map { style(e, from: $0) } }
             let on = styles.contains(where: \.on)
             let sameSource = Set(es.map(\.from)).count == 1
-            let color = sameSource ? styles[0].color : Color.secondary
+            let color = busColor(es) ?? (sameSource ? styles[0].color : Color.secondary)
             let allSends = es.allSatisfy(\.isSend)
             let width: CGFloat = (on && lit != nil ? 2.5 : 1.8)
             var trunk = Path()
@@ -903,6 +976,7 @@ struct GraphContent: View {
             t.addPath(curve(CGPoint(x: endX + 8, y: p.y), j))
             let muted = edges.allSatisfy(\.muted)
             let a = on ? (muted ? 0.3 : (highlight ? 1 : (send ? 0.75 : 0.95))) : 0.07
+            let color = busColor(edges) ?? color
             ctx.stroke(t, with: .color(color.opacity(a)),
                        style: StrokeStyle(lineWidth: 1.6 + (on ? wBoost : 0), lineCap: .butt, dash: send ? [7, 4] : []))
             if splitPrePost && edges.allSatisfy({ $0.isSend && $0.isPre }) {
@@ -1060,6 +1134,8 @@ struct GraphContent: View {
             let n = CGFloat(rails.count)
             for (rank, i) in order.enumerated() {
                 let r = rails[i]
+                // The bus colour from I/O Setup, when there is one; else the blocks' colour.
+                let rc = busColor(r.edges) ?? railColor
                 let ys = r.edges.compactMap { midYs[$0.from] }
                 let top = ys.min()!, bottom = ys.max()!
                 // A rail is stretched when its exit falls outside it (e.g. a single block with several rails).
@@ -1070,13 +1146,13 @@ struct GraphContent: View {
                 var rail = Path()
                 rail.move(to: CGPoint(x: railX[i], y: min(top, exitY)))
                 rail.addLine(to: CGPoint(x: railX[i], y: max(bottom, exitY)))
-                ctx.stroke(rail, with: .color(railColor.opacity(highlight ? dim : 0.9)), style: StrokeStyle(lineWidth: 2.2, lineCap: .round, dash: dash))
+                ctx.stroke(rail, with: .color(rc.opacity(highlight ? dim : 0.9)), style: StrokeStyle(lineWidth: 2.2, lineCap: .round, dash: dash))
                 if highlight && railOn {
                     // Only the stretch of the rail between the lit blocks and the exit.
                     var part = Path()
                     part.move(to: CGPoint(x: railX[i], y: min(onYs.min()!, exitY)))
                     part.addLine(to: CGPoint(x: railX[i], y: max(onYs.max()!, exitY)))
-                    ctx.stroke(part, with: .color(railColor.opacity(1)), style: StrokeStyle(lineWidth: 2.2 + wBoost, lineCap: .round, dash: dash))
+                    ctx.stroke(part, with: .color(rc.opacity(1)), style: StrokeStyle(lineWidth: 2.2 + wBoost, lineCap: .round, dash: dash))
                 }
                 if spacing >= 11 {
                     let t = ctx.resolve(Text(r.label).font(.system(size: 7, weight: .bold)).foregroundColor(.secondary))
@@ -1092,14 +1168,14 @@ struct GraphContent: View {
                 trunk.addLine(to: CGPoint(x: lastX + 8, y: exitY))
                 trunk.addPath(curve(CGPoint(x: lastX + 8, y: exitY), r.j))
                 let tAlpha = railOn ? (allMuted ? 0.3 : (highlight ? 1 : (r.isSend ? 0.75 : 0.95))) : dim
-                ctx.stroke(trunk, with: .color(railColor.opacity(tAlpha)),
+                ctx.stroke(trunk, with: .color(rc.opacity(tAlpha)),
                            style: StrokeStyle(lineWidth: w, lineCap: .butt, dash: r.isSend ? [7, 4] : []))
                 if splitPrePost && r.edges.allSatisfy({ $0.isSend && $0.isPre }) {
                     ctx.stroke(trunk, with: .color(Self.preBlue.opacity(railOn ? 1 : dim)),
                                style: StrokeStyle(lineWidth: w + 1.6, lineCap: .round, dash: [0.01, 12], dashPhase: -9))
                 }
                 ctx.fill(Path(ellipseIn: CGRect(x: railX[i] - 2.6, y: exitY - 2.6, width: 5.2, height: 5.2)),
-                         with: .color(railColor.opacity(a(railOn))))
+                         with: .color(rc.opacity(a(railOn))))
             }
             // Lit block lines on top, so they stay readable over the faded rails.
             if highlight { for id in bar.ids { draw(id, lit: true) } }
@@ -1650,4 +1726,76 @@ enum Palette {
     /// Graph background: a touch darker than the blocks in light mode, darker than them in dark mode.
     static func canvas(_ dark: Bool) -> Color { dark ? Color(white: 0.105) : Color(white: 0.915) }
     static func block(_ dark: Bool) -> Color { dark ? Color(white: 0.215) : Color.white }
+}
+
+
+// MARK: - Activity bar
+
+/// Shows what PT Wiregram is reading from Pro Tools and whether it worked; finished reads
+/// disappear by themselves after a few seconds (failures stay a little longer).
+struct ActivityBar: View {
+    @EnvironmentObject var model: SessionModel
+
+    var body: some View {
+        VStack(spacing: 6) {
+            ForEach(model.activities) { a in
+                HStack(spacing: 8) {
+                    switch a.state {
+                    case .running: ProgressView().controlSize(.small)
+                    case .done: Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
+                    case .partial: Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+                    case .failed: Image(systemName: "xmark.octagon.fill").foregroundStyle(.red)
+                    }
+                    Text(a.text).lineLimit(2)
+                    if a.state != .running {
+                        Button { model.dismissActivity(a.id) } label: { Image(systemName: "xmark") }
+                            .buttonStyle(.borderless)
+                    }
+                }
+                .font(.callout)
+                .padding(.horizontal, 14).padding(.vertical, 8)
+                .background(.regularMaterial, in: Capsule())
+                .overlay(Capsule().strokeBorder(.separator))
+                .shadow(color: .black.opacity(0.12), radius: 6, y: 2)
+                .transition(.move(edge: .top).combined(with: .opacity))
+            }
+        }
+        .padding(.top, 10)
+        .animation(.easeInOut(duration: 0.25), value: model.activities)
+    }
+}
+
+
+/// Opens PT Wiregram ▸ Settings…, optionally on a given tab. macOS 14 has an API for this;
+/// macOS 13 uses the menu action.
+struct OpenSettingsButton: View {
+    var title = "Settings…"
+    var tab: String?
+    var body: some View {
+        if #available(macOS 14.0, *) {
+            OpenSettingsButton14(title: title, tab: tab)
+        } else {
+            Button(title) {
+                if let tab { UserDefaults.standard.set(tab, forKey: "settingsTab") }
+                NSApp.activate(ignoringOtherApps: true)
+                if !NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil) {
+                    NSApp.sendAction(Selector(("showPreferencesWindow:")), to: nil, from: nil)
+                }
+            }
+        }
+    }
+}
+
+@available(macOS 14.0, *)
+private struct OpenSettingsButton14: View {
+    @Environment(\.openSettings) private var openSettings
+    let title: String
+    let tab: String?
+    var body: some View {
+        Button(title) {
+            if let tab { UserDefaults.standard.set(tab, forKey: "settingsTab") }
+            NSApp.activate(ignoringOtherApps: true)
+            openSettings()
+        }
+    }
 }

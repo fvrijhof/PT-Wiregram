@@ -356,20 +356,26 @@ final class ProToolsAX {
     static func readHiddenRouting(ptsl: PTSLClient, names: [String], unhide: [String]? = nil,
                                   openFolders: [String] = []) throws -> [String: AXRouting] {
         guard !names.isEmpty else { return [:] }
+        // Tracks in closed folders only need their folders opened; nothing to unhide then.
         let toggle = unhide ?? names
-        try ptsl.setHidden(toggle, hidden: false)
-        defer { try? ptsl.setHidden(toggle, hidden: true) }      // runs last
+        if !toggle.isEmpty { try ptsl.setHidden(toggle, hidden: false) }
+        defer { if !toggle.isEmpty { try? ptsl.setHidden(toggle, hidden: true) } }      // runs last
         try ptsl.setOpen(openFolders, open: true)
         defer { try? ptsl.setOpen(openFolders, open: false) }    // runs first
-        Thread.sleep(forTimeInterval: 0.8)
-        let ax = ProToolsAX()
-        var all = ax.readRouting(forceRescan: true)
-        if names.contains(where: { all[$0] == nil }) { // give Pro Tools a moment more
-            Thread.sleep(forTimeInterval: 1.0)
-            all = ax.readRouting(forceRescan: true)
+        // Names in the Mix window can differ slightly (spacing, case): compare loosely.
+        func key(_ s: String) -> String {
+            s.lowercased().split(whereSeparator: \.isWhitespace).joined(separator: " ")
         }
-        let wanted = Set(names)
-        return all.filter { wanted.contains($0.key) }
+        let wanted = Set(names.map(key))
+        let ax = ProToolsAX()
+        var all: [String: AXRouting] = [:]
+        // Wait until Pro Tools has drawn the strips (large sessions take a while), up to ~6 s.
+        for wait in [0.8, 1.0, 1.5, 1.5, 1.5] {
+            Thread.sleep(forTimeInterval: wait)
+            all = ax.readRouting(forceRescan: true)
+            if Set(all.keys.map(key)).isSuperset(of: wanted) { break }
+        }
+        return all.filter { wanted.contains(key($0.key)) }
     }
 
     // MARK: Groups
@@ -460,22 +466,57 @@ final class ProToolsAX {
 
     /// Dumps every attribute of the I/O Setup window's tables (to learn how assignments are exposed).
     static func probeIOSetup(to url: URL) {
-        var out = ""
-        guard let pid = proToolsPID else { return }
+        var out = "Accessibility access: \(AXIsProcessTrusted() ? "yes" : "NO (System Settings ▸ Privacy & Security ▸ Accessibility)")\n"
+        guard let pid = proToolsPID else {
+            out += "Pro Tools is not running.\n"
+            try? out.write(to: url, atomically: true, encoding: .utf8)
+            return
+        }
         let app = AXUIElementCreateApplication(pid)
+        AXUIElementSetMessagingTimeout(app, 2.0)
+        let titles = ((attr(app, kAXWindowsAttribute) as? [AXUIElement]) ?? []).map { (attr($0, kAXTitleAttribute) as? String) ?? "?" }
+        out += "Pro Tools windows: \(titles.isEmpty ? "(none visible)" : titles.joined(separator: " | "))\n"
+        if !titles.contains("I/O Setup") { out += "The I/O Setup window is not open (Setup ▸ I/O…).\n" }
+        func walk(_ e: AXUIElement, _ indent: String, _ depth: Int) {
+            out += allAttrs(e, indent: indent)
+            guard depth < 4 else { return }
+            for k in (attr(e, kAXChildrenAttribute) as? [AXUIElement]) ?? [] { out += indent + "CHILD\n"; walk(k, indent + "  ", depth + 1) }
+        }
         for w in (attr(app, kAXWindowsAttribute) as? [AXUIElement]) ?? [] where (attr(w, kAXTitleAttribute) as? String) == "I/O Setup" {
+            out += "WINDOW CONTROLS\n"
+            for k in (attr(w, kAXChildrenAttribute) as? [AXUIElement]) ?? [] where (attr(k, kAXRoleAttribute) as? String) != "AXTable" {
+                out += allAttrs(k, indent: "  ")
+            }
             for t in (attr(w, kAXChildrenAttribute) as? [AXUIElement]) ?? [] where (attr(t, kAXRoleAttribute) as? String) == "AXTable" {
                 out += "TABLE \((attr(t, kAXTitleAttribute) as? String) ?? "")\n"
                 out += allAttrs(t, indent: "  ")
                 let rows = (attr(t, kAXRowsAttribute) as? [AXUIElement]) ?? []
-                for (ri, row) in rows.prefix(4).enumerated() {
+                for (ri, row) in rows.prefix(6).enumerated() {
                     out += "  ROW \(ri)\n" + allAttrs(row, indent: "    ")
-                    for (ci, cell) in ((attr(row, kAXChildrenAttribute) as? [AXUIElement]) ?? []).prefix(6).enumerated() {
-                        out += "    CELL \(ci)\n" + allAttrs(cell, indent: "      ")
-                        for k in (attr(cell, kAXChildrenAttribute) as? [AXUIElement]) ?? [] { out += "      CHILD\n" + allAttrs(k, indent: "        ") }
+                    for (ci, cell) in ((attr(row, kAXChildrenAttribute) as? [AXUIElement]) ?? []).enumerated() {
+                        out += "    CELL \(ci)\n"
+                        walk(cell, "      ", 0)
                     }
                 }
             }
+        }
+        // Mix window: every attribute of the first few input/output selectors (does Pro Tools
+        // expose the bus colour drawn in them?).
+        var shown = 0
+        func findSelectors(_ e: AXUIElement, _ depth: Int) {
+            guard shown < 6, depth < 12 else { return }
+            let t = ((attr(e, kAXTitleAttribute) as? String) ?? "").lowercased()
+            if t.hasPrefix("audio output path selector") || t.hasPrefix("audio input path selector") {
+                shown += 1
+                out += "SELECTOR \(shown)\n"
+                walk(e, "  ", 2)
+                return
+            }
+            for k in (attr(e, kAXChildrenAttribute) as? [AXUIElement]) ?? [] { findSelectors(k, depth + 1) }
+        }
+        for w in (attr(app, kAXWindowsAttribute) as? [AXUIElement]) ?? [] where ((attr(w, kAXTitleAttribute) as? String) ?? "").hasPrefix("Mix:") {
+            out += "\nMIX WINDOW SELECTORS\n"
+            findSelectors(w, 0)
         }
         try? out.write(to: url, atomically: true, encoding: .utf8)
     }

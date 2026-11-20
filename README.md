@@ -28,6 +28,11 @@ with a session open.
 - Signal-flow graph of tracks, auxes, busses, sends and output paths, with VCA and table views
 - Rails that combine lines going to the same place, so even busy sessions stay readable
 - Collapse tracks (identical routing, folder or group), a minimap and a hand tool for large sessions
+- Follows Pro Tools: closed folders become one block and hidden tracks stay hidden ("Match Pro Tools")
+- Lines in track colours or in the bus colours set in Pro Tools' I/O Setup (Settings)
+- View bar with toggles for every view setting, including pre- and post-fader sends
+- Settings for colours, bus columns and how often to refresh, which you can export and share
+- Developer mode with demo sessions that run without Pro Tools and diagnostic exports
 - Focus view: right-click a block to see only its routing
 - Reads groups, hidden tracks and the I/O Setup on request. It asks first, stops playback,
   and changes nothing in the session.
@@ -44,7 +49,7 @@ Version 1.0 has no updater: install 1.1 once by hand.
 ## Requirements
 
 - macOS 13 or later
-- Pro Tools with PTSL enabled
+- Pro Tools 2023 or later with PTSL enabled (tested with Pro Tools 2024.10)
 - Accessibility permission for PT Wiregram (System Settings → Privacy & Security → Accessibility)
 - To build: Xcode Command Line Tools (`xcode-select --install`); full Xcode is not needed
 
@@ -66,6 +71,7 @@ ad-hoc signed.
 | `Sources/Wiregram/Views.swift` | SwiftUI views |
 | `Sources/Wiregram/PTSLClient.swift` | Minimal PTSL (gRPC over HTTP/2) client |
 | `Sources/Wiregram/ProToolsAX.swift` | Accessibility-based routing reader |
+| `Sources/Wiregram/IOColors.swift` | Bus colours from Pro Tools' saved I/O settings (`Last Used.pio`) |
 | `Sources/Wiregram/Updater.swift` | Automatic updates from GitHub releases |
 | `Sources/Wiregram/Demo.swift` | Synthetic session for testing without Pro Tools |
 | `tools/make_icon.swift` | Generates the app icon |
@@ -78,6 +84,8 @@ The binary accepts a few flags for debugging, for example:
 "PT Wiregram.app/Contents/MacOS/Wiregram" --dump-ax ax-tree.txt
 "PT Wiregram.app/Contents/MacOS/Wiregram" --routing-test routing.txt
 "PT Wiregram.app/Contents/MacOS/Wiregram" --transport
+"PT Wiregram.app/Contents/MacOS/Wiregram" --folder-diag folders.txt
+"PT Wiregram.app/Contents/MacOS/Wiregram" --pio-colors
 "PT Wiregram.app/Contents/MacOS/Wiregram" --demo demo.png --tracks 60
 ```
 
